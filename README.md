@@ -1,3 +1,5 @@
+# NOT WORKING FOR NOW BECAUSE THE QUICKSHELL API IS NOT STABLE
+
 # quickshell-greetd
 
 Use your existing Quickshell lockscreen as system login screen.
