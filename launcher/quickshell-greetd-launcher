@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+
+QUICKSHELL_CONFIG="${QUICKSHELL_CONFIG:-$HOME/.config/quickshell/greeter.qml}"
+CAGE_ARGS="${CAGE_ARGS:--s}"
+
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+
+command -v cage >/dev/null || { echo "cage not found"; exit 1; }
+command -v quickshell >/dev/null || { echo "quickshell not found"; exit 1; }
+
+[[ -f "$QUICKSHELL_CONFIG" ]] || { 
+    echo "Config not found: $QUICKSHELL_CONFIG"
+    exit 1
+}
+
+exec cage $CAGE_ARGS -- quickshell -c "$QUICKSHELL_CONFIG"
