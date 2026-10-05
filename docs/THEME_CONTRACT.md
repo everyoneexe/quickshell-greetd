@@ -13,6 +13,26 @@ cannot stop you from logging in.
 | Recovery | `QsGreet.FallbackLogin` | Theme fails to load, or loads and draws nothing → the core replaces it with a working login. |
 | Users, sessions, power | `QsGreet.Users`, `.Sessions`, `.Power` | Discovery runs once in the launcher; themes read results. |
 
+## What is not a theme
+
+**SDDM themes are out of scope.** Not as a slight, and not because they are
+hard to drive - the API they need is small. They reach `sddm`, `userModel`,
+`sessionModel`, `keyboard` and `screenModel` as bare names, which SDDM
+injects from C++ with `QQmlContext::setContextProperty`. QML cannot supply
+those: a type name must begin with an uppercase letter, so a `sddm`
+singleton never binds.
+
+```
+# qmldir: singleton sddm 1.0 sddm.qml
+ReferenceError: sddm is not defined
+```
+
+Quickshell offers no way in either - it sets no context properties anywhere.
+Supporting SDDM themes would therefore mean shipping a C++ plugin purely to
+inject six names, or rewriting every file in the theme that uses them (11 of
+16 files and ~91 references in SilentSDDM, measured). Both contradict what
+this project is for, which is running Quickshell lockscreens as greeters.
+
 ## What a theme is
 
 A directory under `/usr/share/quickshell-greetd/themes/<name>` containing:
