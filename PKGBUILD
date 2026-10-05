@@ -19,14 +19,16 @@ optdepends=(
 )
 backup=('etc/quickshell-greetd/config.env')
 install="$pkgname.install"
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-# SKIP here on purpose: this file lives inside the tarball it would check,
-# so pinning a digest can never be self-consistent. The AUR copy carries the
-# real sha256, generated with `makepkg -g` after the release is tagged.
+makedepends=('git')
+# A git tag, not GitHub's generated tarball. Those are not byte-stable -
+# their checksum can change under you, and after a tag is moved the CDN
+# serves a stale archive for a while. SKIP is the correct and expected
+# value for a VCS source.
+source=("$pkgname::git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
 package() {
-    cd "$pkgname-$pkgver"
+    cd "$pkgname"
 
     local share="$pkgdir/usr/share/quickshell-greetd"
 
