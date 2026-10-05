@@ -1,19 +1,238 @@
 #!/bin/bash
-set -euo pipefail
+# quickshell-greetd launcher
+#
+# Runs as greetd's default_session.command. Resolves configuration, discovers
+# users and sessions, projects everything into QSGREET_* environment
+# variables, then execs the greeter compositor.
+#
+# All discovery happens here, in one place, so the QML core never touches the
+# filesystem and cannot fail to start because of a bad config file.
 
-QUICKSHELL_CONFIG="${QUICKSHELL_CONFIG:-greeter}"
-CAGE_ARGS="${CAGE_ARGS:--s}"
+set -uo pipefail
 
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+PREFIX="${QSGREET_PREFIX:-/usr/share/quickshell-greetd}"
+CONFIG_SYSTEM="/etc/quickshell-greetd/config.env"
 
-command -v cage >/dev/null || { echo "cage not found"; exit 1; }
-command -v quickshell >/dev/null || { echo "quickshell not found"; exit 1; }
+log() { printf 'quickshell-greetd: %s\n' "$*" >&2; }
 
-[[ -d "$HOME/.config/quickshell/$QUICKSHELL_CONFIG" ]] || { 
-    echo "Config not found: ~/.config/quickshell/$QUICKSHELL_CONFIG/"
-    echo "Create ~/.config/quickshell/$QUICKSHELL_CONFIG/shell.qml"
+die() {
+    log "$*"
     exit 1
 }
 
-exec cage $CAGE_ARGS -- quickshell -c "$QUICKSHELL_CONFIG"
+# --- config -----------------------------------------------------------------
+# A plain shell fragment: KEY=value. Environment set by greetd always wins, so
+# the file is sourced into a subshell first and only unset keys are adopted.
+if [[ -r "$CONFIG_SYSTEM" ]]; then
+    # shellcheck disable=SC1090
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^QSGREET_[A-Z0-9_]+$ ]] || continue
+        [[ -n "${!key:-}" ]] && continue
+        printf -v "$key" '%s' "$value"
+        export "${key?}"
+    done < <(set -a; . "$CONFIG_SYSTEM" >/dev/null 2>&1; set +a; env | grep '^QSGREET_')
+fi
+
+export QSGREET_THEME="${QSGREET_THEME:-fallback}"
+export QSGREET_THEME_ROOT="${QSGREET_THEME_ROOT:-$PREFIX/themes}"
+export QSGREET_THEME_WATCHDOG="${QSGREET_THEME_WATCHDOG:-6}"
+export QSGREET_POWER_ENABLED="${QSGREET_POWER_ENABLED:-1}"
+export QSGREET_COMPOSITOR="${QSGREET_COMPOSITOR:-cage}"
+
+# --- dependencies -----------------------------------------------------------
+command -v quickshell >/dev/null || die "quickshell not found in PATH"
+
+CORE_DIR="${QSGREET_CORE_DIR:-$PREFIX/core}"
+[[ -r "$CORE_DIR/QsGreet/qmldir" ]] || die "QsGreet module not found in $CORE_DIR"
+
+export QML_IMPORT_PATH="$CORE_DIR${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+export QML2_IMPORT_PATH="$QML_IMPORT_PATH"
+
+# --- theme ------------------------------------------------------------------
+# A theme is a prepared Quickshell shell tree. Quickshell must take that tree
+# as its shell root, otherwise the shell's own `import qs.*` and `root:`
+# imports do not resolve and the lockscreen cannot load.
+THEME_DIR="$QSGREET_THEME_ROOT/$QSGREET_THEME"
+
+if [[ "$QSGREET_THEME" != "fallback" && -d "$THEME_DIR/shell" ]]; then
+    if [[ -r "$THEME_DIR/theme.env" ]]; then
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^QSGREET_[A-Z0-9_]+$ ]] || continue
+            [[ -n "${!key:-}" ]] && continue
+            export "$key=$value"
+        done < "$THEME_DIR/theme.env"
+    fi
+    ENTRY="$THEME_DIR/shell/_qsgreet-entry.qml"
+    [[ -r "$ENTRY" ]] || die "theme '$QSGREET_THEME' is not prepared (missing $ENTRY)"
+
+    # A prepared theme may carry an exported appearance payload (palette,
+    # wallpaper, avatar). Point the greeter's XDG dirs at it so the shell
+    # resolves exactly the paths it does on the desktop.
+    if [[ -d "$THEME_DIR/state" ]]; then
+        export HOME="$THEME_DIR/state"
+        export XDG_CONFIG_HOME="$THEME_DIR/state/config"
+        export XDG_STATE_HOME="$THEME_DIR/state/state"
+        export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/quickshell-greetd-cache}"
+        mkdir -p "$XDG_CACHE_HOME" 2>/dev/null || true
+    fi
+else
+    [[ "$QSGREET_THEME" == "fallback" ]] || log "theme '$QSGREET_THEME' not found at $THEME_DIR, using built-in login"
+    export QSGREET_THEME=fallback
+    ENTRY="$CORE_DIR/entry.qml"
+    [[ -r "$ENTRY" ]] || die "core entry not readable: $ENTRY"
+fi
+
+# --- fingerprint ------------------------------------------------------------
+# greetd runs PAM as root for the target user, so fingerprint belongs in its
+# stack, not in the greeter. Detect it and let themes offer the affordance;
+# the reader prompts arrive as ordinary greetd auth messages.
+if [[ -z "${QSGREET_FINGERPRINT:-}" ]]; then
+    if grep -qrs 'pam_fprintd\.so' /etc/pam.d/greetd /etc/pam.d/system-local-login /etc/pam.d/system-auth 2>/dev/null; then
+        QSGREET_FINGERPRINT=1
+    else
+        QSGREET_FINGERPRINT=0
+    fi
+fi
+export QSGREET_FINGERPRINT
+
+# --- user discovery ---------------------------------------------------------
+# Regular accounts only, per /etc/login.defs, matching what SDDM and
+# AccountsService consider a human user.
+uid_min=$(awk '$1=="UID_MIN"{print $2}' /etc/login.defs 2>/dev/null)
+uid_max=$(awk '$1=="UID_MAX"{print $2}' /etc/login.defs 2>/dev/null)
+uid_min="${uid_min:-1000}"
+uid_max="${uid_max:-60000}"
+
+# Avatars must live somewhere the greeter can read; ~/.face cannot work
+# because a home directory is mode 700. Prefer our shared store, then
+# AccountsService, which is already world-readable.
+QSGREET_AVATAR_STORE="${QSGREET_AVATAR_STORE:-/var/cache/quickshell-greetd/avatars}"
+
+if [[ -z "${QSGREET_USERS_JSON:-}" ]]; then
+    QSGREET_USERS_JSON=$(
+        getent passwd | awk -F: -v min="$uid_min" -v max="$uid_max" -v store="$QSGREET_AVATAR_STORE" '
+            function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+            function avatar(name,   candidate) {
+                candidate = store "/" name
+                if ((getline line < candidate) >= 0) { close(candidate); return candidate }
+                candidate = "/var/lib/AccountsService/icons/" name
+                if ((getline line < candidate) >= 0) { close(candidate); return candidate }
+                return ""
+            }
+            $3 >= min && $3 <= max && $7 !~ /(nologin|false)$/ {
+                split($5, gecos, ",")
+                name = esc($1)
+                display = esc(gecos[1] == "" ? $1 : gecos[1])
+                printf "%s{\"name\":\"%s\",\"displayName\":\"%s\",\"uid\":%s,\"home\":\"%s\",\"avatar\":\"%s\"}",
+                    (count++ ? "," : ""), name, display, $3, esc($6), esc(avatar($1))
+            }
+        '
+    )
+    QSGREET_USERS_JSON="[${QSGREET_USERS_JSON}]"
+fi
+export QSGREET_USERS_JSON
+
+# Single-user machines log straight in without a user picker.
+if [[ -z "${QSGREET_USER:-}" ]]; then
+    user_count=$(grep -o '"name"' <<<"$QSGREET_USERS_JSON" | wc -l)
+    if [[ "$user_count" == "1" ]]; then
+        QSGREET_USER=$(sed -n 's/.*"name":"\([^"]*\)".*/\1/p' <<<"$QSGREET_USERS_JSON")
+        export QSGREET_USER
+    fi
+fi
+export QSGREET_LOCK_USER="${QSGREET_LOCK_USER:-1}"
+
+# --- session discovery ------------------------------------------------------
+if [[ -z "${QSGREET_SESSIONS_JSON:-}" ]]; then
+    QSGREET_SESSIONS_JSON=$(
+        for dir in /usr/share/wayland-sessions /usr/local/share/wayland-sessions \
+                   /usr/share/xsessions /usr/local/share/xsessions; do
+            [[ -d "$dir" ]] || continue
+            case "$dir" in
+                *wayland-sessions) type=wayland ;;
+                *) type=x11 ;;
+            esac
+            for file in "$dir"/*.desktop; do
+                [[ -r "$file" ]] || continue
+                printf '%s\t%s\n' "$type" "$file"
+            done
+        done | awk -F'\t' '
+            function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+            function emit() {
+                if (id == "" || exec_line == "") return
+                # Strip desktop-entry field codes (%f %U %i ...).
+                gsub(/%[a-zA-Z]/, "", exec_line)
+                n = split(exec_line, parts, /[ \t]+/)
+                cmd = ""
+                for (i = 1; i <= n; i++) {
+                    if (parts[i] == "") continue
+                    cmd = cmd (cmd == "" ? "" : ",") "\"" esc(parts[i]) "\""
+                }
+                if (cmd == "") return
+                printf "%s{\"id\":\"%s\",\"name\":\"%s\",\"exec\":[%s],\"type\":\"%s\"}",
+                    (count++ ? "," : ""), esc(id), esc(name == "" ? id : name), cmd, type
+            }
+            {
+                if (NR > 1) emit()
+                type = $1
+                path = $2
+                id = path
+                sub(/.*\//, "", id)
+                sub(/\.desktop$/, "", id)
+                name = ""; exec_line = ""; hidden = 0
+                while ((getline line < path) > 0) {
+                    if (line ~ /^Name=/ && name == "") { name = substr(line, 6) }
+                    else if (line ~ /^Exec=/ && exec_line == "") { exec_line = substr(line, 6) }
+                    else if (line ~ /^(Hidden|NoDisplay)=true/) { hidden = 1 }
+                }
+                close(path)
+                if (hidden) { id = "" }
+            }
+            END { emit() }
+        '
+    )
+    QSGREET_SESSIONS_JSON="[${QSGREET_SESSIONS_JSON}]"
+fi
+export QSGREET_SESSIONS_JSON
+
+export QSGREET_DEFAULT_COMMAND="${QSGREET_DEFAULT_COMMAND:-[]}"
+export QSGREET_SESSION_ENV="${QSGREET_SESSION_ENV:-[]}"
+
+# Remember the last session across logins when the state dir is writable.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell-greetd"
+if [[ -r "$STATE_DIR/last-session" ]]; then
+    QSGREET_LAST_SESSION=$(<"$STATE_DIR/last-session")
+    export QSGREET_LAST_SESSION
+fi
+
+# --- compositor -------------------------------------------------------------
+# cage has no wlr-layer-shell, so the core must use a plain toplevel there.
+# niri and sway do, which gives proper per-output surfaces.
+case "$QSGREET_COMPOSITOR" in
+    cage)
+        command -v cage >/dev/null || die "cage not found in PATH"
+        export QSGREET_WINDOW_MODE="${QSGREET_WINDOW_MODE:-floating}"
+        # -d: no client-side decorations, -s: allow VT switching.
+        compositor=(cage -d -s --)
+        ;;
+    niri)
+        command -v niri >/dev/null || die "niri not found in PATH"
+        export QSGREET_WINDOW_MODE="${QSGREET_WINDOW_MODE:-layer}"
+        compositor=(niri --config "${QSGREET_NIRI_CONFIG:-/etc/quickshell-greetd/niri.kdl}" --)
+        ;;
+    sway)
+        command -v sway >/dev/null || die "sway not found in PATH"
+        export QSGREET_WINDOW_MODE="${QSGREET_WINDOW_MODE:-layer}"
+        compositor=(sway --config "${QSGREET_SWAY_CONFIG:-/etc/quickshell-greetd/sway.conf}" --)
+        ;;
+    *)
+        die "unknown QSGREET_COMPOSITOR '$QSGREET_COMPOSITOR' (cage|niri|sway)"
+        ;;
+esac
+
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+export XDG_SESSION_TYPE=wayland
+
+log "theme=$QSGREET_THEME compositor=$QSGREET_COMPOSITOR window=$QSGREET_WINDOW_MODE user=${QSGREET_USER:-<ask>}"
+
+exec "${compositor[@]}" quickshell -p "$ENTRY"

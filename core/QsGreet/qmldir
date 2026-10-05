@@ -1,0 +1,13 @@
+module QsGreet
+
+singleton GreeterConfig 1.0 GreeterConfig.qml
+singleton Auth 1.0 Auth.qml
+singleton Sessions 1.0 Sessions.qml
+singleton Users 1.0 Users.qml
+singleton Power 1.0 Power.qml
+singleton PamResult 1.0 PamResult.qml
+
+GreetdPamContext 1.0 GreetdPamContext.qml
+GreeterLockContext 1.0 GreeterLockContext.qml
+ThemeHost 1.0 ThemeHost.qml
+FallbackLogin 1.0 FallbackLogin.qml

@@ -1,0 +1,46 @@
+# /etc/pam.d/greetd - example stack for quickshell-greetd
+#
+# greetd runs this as root for the user being logged in. That is the correct
+# place for anything privileged: the greeter itself stays unprivileged and
+# never talks to PAM, fprintd or the keyring directly.
+#
+# Copy to /etc/greetd/../pam.d/greetd only after reading it. A broken PAM
+# stack locks you out; keep a root TTY open while testing.
+
+#%PAM-1.0
+
+auth       required     pam_securetty.so
+auth       requisite    pam_nologin.so
+
+# Fingerprint, optional.
+#
+# Uncomment to let greetd drive the reader. The prompts ("Place your finger
+# on the fingerprint reader") arrive as ordinary greetd auth messages and
+# appear in QsGreet's Auth.infoMessage, so themes can display them. The
+# launcher notices pam_fprintd here and sets QSGREET_FINGERPRINT=1, which is
+# what makes a lockscreen theme offer the affordance.
+#
+# `sufficient` means a successful scan skips the password; a failed scan
+# falls through to it. Requires the fprintd package and enrolled prints
+# (`fprintd-enroll`).
+#
+#auth       sufficient   pam_fprintd.so
+
+auth       include      system-local-login
+
+# Keyring auto-unlock, optional.
+#
+# Unlocks the login keyring with the password just typed, so the session
+# starts with secrets already available. Without this you get a second
+# keyring prompt after logging in.
+#
+# Requires gnome-keyring. The `auth` line must come after the password
+# module that actually collects the password.
+#
+#auth       optional     pam_gnome_keyring.so
+
+account    include      system-local-login
+password   include      system-local-login
+session    include      system-local-login
+
+#session    optional     pam_gnome_keyring.so auto_start

@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Turn a Quickshell shell tree into a greeter theme.
+
+A Quickshell config only resolves its own `import qs.*` and `root:` imports
+when it is the *shell root*. A greeter therefore cannot load someone's
+lockscreen through QML_IMPORT_PATH - the tree must be the root itself.
+
+So a theme is the tree, with two files injected:
+
+    <theme>/shell/                  copy of the shell tree (the shell root)
+    <theme>/shell/_qsgreet-entry.qml   core entry, opens the window
+    <theme>/shell/_qsgreet-main.qml    adapter, loads the lock surface
+    <theme>/theme.env                  surface selection and overrides
+
+The tree is copied, not symlinked: the greeter runs as the `greeter` user and
+cannot read a home directory that is mode 700.
+
+    qsgreet-theme-prepare ~/.config/quickshell/inir \\
+        --surface modules/iris/lock/IrisLockSurface.qml \\
+        /usr/share/quickshell-greetd/themes/iris
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+DEFAULT_PREFIX = Path("/usr/share/quickshell-greetd")
+
+IGNORED = shutil.ignore_patterns(
+    ".git", ".github", "node_modules", "__pycache__", ".cache", "*.pyc",
+)
+
+ENTRY_NAME = "_qsgreet-entry.qml"
+MAIN_NAME = "_qsgreet-main.qml"
+
+# A theme directory is world-readable, so anything copied into it is public.
+# Shell configs routinely hold API keys and Wi-Fi passwords; redact them.
+SECRET_KEY = re.compile(
+    r"(api_?key|token|secret|password|passwd|credential|client_?id|access_?key)",
+    re.IGNORECASE,
+)
+
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".gif", ".m4v"}
+
+
+def _is_secret(key: str, value) -> bool:
+    """Only non-empty strings can be a credential.
+
+    Keys like `lock.security.requirePasswordToPower` match the pattern but
+    hold booleans; blanking those would silently change behaviour.
+    """
+    if not SECRET_KEY.search(key):
+        return False
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if stripped == "":
+        return False
+    return stripped.lower() not in ("true", "false")
+
+
+def redact(value, path="", found=None):
+    """Blank out leaf values whose key looks like a credential."""
+    if found is None:
+        found = []
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            child = f"{path}.{key}".lstrip(".")
+            if _is_secret(key, item):
+                found.append(child)
+                out[key] = ""
+            else:
+                out[key], _ = redact(item, child, found)
+        return out, found
+    if isinstance(value, list):
+        out = []
+        for index, item in enumerate(value):
+            cleaned, _ = redact(item, f"{path}[{index}]", found)
+            out.append(cleaned)
+        return out, found
+    return value, found
+
+
+def export_appearance(source: Path, destination: Path, config_name: str) -> None:
+    """Copy the palette, wallpaper and avatar a shell needs to look identical.
+
+    The greeter runs as `greeter` and cannot read a mode-700 home, so these
+    have to live somewhere public. That makes redaction mandatory, not
+    optional.
+    """
+    home = Path(os.path.expanduser("~"))
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    state_home = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
+
+    # Qt's StateLocation is $XDG_STATE_HOME/<app>, which for Quickshell is
+    # .../quickshell. The shell then reads <that>/user/generated/colors.json
+    # (Directories.qml:27,40,83), so the layout has to match exactly.
+    state = destination / "state"
+    out_config = state / "config" / config_name
+    out_state = state / "state" / "quickshell" / "user" / "generated"
+    out_config.mkdir(parents=True, exist_ok=True)
+    out_state.mkdir(parents=True, exist_ok=True)
+
+    # 1. Shell config - drives every appearance option.
+    config_file = config_home / config_name / "config.json"
+    if config_file.is_file():
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+        cleaned, redacted = redact(data)
+        background = cleaned.get("background")
+
+        if isinstance(background, dict):
+            # A video wallpaper is both unplayable-by-default and huge in a
+            # world-readable directory; prefer the still thumbnail.
+            candidates = [
+                background.get("thumbnailPath") or "",
+                background.get("wallpaperPath") or "",
+            ]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                wallpaper = Path(os.path.expanduser(candidate))
+                if not wallpaper.is_file():
+                    print(f"  wallpaper  : missing ({candidate})")
+                    continue
+                size_mb = wallpaper.stat().st_size / (1024 * 1024)
+                if wallpaper.suffix.lower() in VIDEO_SUFFIXES:
+                    print(
+                        f"  wallpaper  : {wallpaper.name} is a video ({size_mb:.0f} MiB); "
+                        "set background.thumbnailPath for a still, skipping"
+                    )
+                    continue
+                target = state / f"wallpaper{wallpaper.suffix}"
+                shutil.copyfile(wallpaper, target)
+                background["wallpaperPath"] = str(target)
+                print(f"  wallpaper  : {wallpaper.name} ({size_mb:.1f} MiB)")
+                break
+            else:
+                print("  wallpaper  : none exported, the palette may shift")
+
+        (out_config / "config.json").write_text(
+            json.dumps(cleaned, indent=2), encoding="utf-8"
+        )
+        if redacted:
+            print(f"  redacted   : {len(redacted)} credential field(s)")
+            for key in redacted:
+                print(f"               {key}")
+    else:
+        print(f"  config     : missing ({config_file}), using shell defaults")
+
+    # 2. Generated material palette - without this the colours do not match.
+    colors = state_home / "quickshell" / "user" / "generated" / "colors.json"
+    if colors.is_file():
+        shutil.copyfile(colors, out_state / "colors.json")
+        print("  palette    : colors.json")
+    else:
+        print(f"  palette    : missing ({colors}), colours will fall back")
+
+    # 3. Avatar.
+    #
+    # The shared store is the source of truth, but a lockscreen theme looks
+    # the avatar up through its own shell paths (~/.face), and the launcher
+    # points HOME at this directory. So mirror the store into it, rather
+    # than reading the user's unreadable home.
+    user = os.environ.get("SUDO_USER") or os.environ.get("USER") or ""
+    store = Path(os.environ.get("QSGREET_AVATAR_STORE", "/var/cache/quickshell-greetd/avatars"))
+    stored = store / user if user else None
+
+    if stored is not None and stored.is_file():
+        shutil.copyfile(stored, state / ".face")
+        print(f"  avatar     : from {stored}")
+    else:
+        print("  avatar     : none; run `sudo qsgreet-set-avatar <image>` then re-run with --force")
+
+    for path in state.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+
+
+def resolve_source_file(explicit: Path | None, prefix: Path, relative: str) -> Path:
+    """Prefer an explicit path, then the install prefix, then the repo."""
+    if explicit is not None:
+        return explicit
+    installed = prefix / relative
+    if installed.is_file():
+        return installed
+    repo = Path(__file__).resolve().parent.parent / relative
+    if repo.is_file():
+        return repo
+    raise FileNotFoundError(f"cannot find {relative} in {prefix} or the source tree")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("source", type=Path, help="Quickshell shell tree to turn into a theme")
+    parser.add_argument("destination", type=Path, help="theme directory to create")
+    parser.add_argument(
+        "--surface",
+        default="modules/iris/lock/IrisLockSurface.qml",
+        help="surface to render, relative to the shell tree",
+    )
+    parser.add_argument(
+        "--kind",
+        choices=("lockscreen", "standalone"),
+        default="lockscreen",
+        help="lockscreen: the surface takes a host-supplied context, as lock "
+             "surfaces do. standalone: the surface is already a complete "
+             "greeter and is given nothing (default: lockscreen)",
+    )
+    parser.add_argument(
+        "--prefix",
+        type=Path,
+        default=DEFAULT_PREFIX,
+        help=f"installation prefix holding core/ and adapters/ (default: {DEFAULT_PREFIX})",
+    )
+    parser.add_argument("--entry", type=Path, help="override the core entry QML")
+    parser.add_argument("--adapter", type=Path, help="override the adapter QML")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace the destination if it already exists",
+    )
+    parser.add_argument(
+        "--appearance",
+        action="store_true",
+        help="also export the palette, wallpaper and avatar so the greeter "
+             "looks identical; credential-shaped config fields are redacted "
+             "because the theme directory is world-readable",
+    )
+    parser.add_argument(
+        "--appearance-config",
+        default="illogical-impulse",
+        metavar="DIR",
+        help="config subdirectory holding config.json (default: illogical-impulse)",
+    )
+    args = parser.parse_args()
+
+    source = args.source.expanduser().resolve()
+    destination = args.destination.expanduser()
+
+    if not source.is_dir():
+        print(f"error: {source} is not a directory", file=sys.stderr)
+        return 1
+
+    surface_path = source / args.surface
+    if not surface_path.is_file():
+        print(f"error: surface {args.surface} not found under {source}", file=sys.stderr)
+        return 1
+
+    # The source is someone's live shell configuration. Refuse any
+    # destination that could cause a write inside it.
+    resolved_destination = destination.resolve()
+    if resolved_destination == source or source in resolved_destination.parents:
+        print(
+            f"error: destination {resolved_destination} is inside the source tree {source};\n"
+            "       this tool never writes to the shell it reads from",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        entry = resolve_source_file(args.entry, args.prefix, "core/entry.qml")
+        adapter = resolve_source_file(args.adapter, args.prefix, f"adapters/{args.kind}/Main.qml")
+    except FileNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    shell = destination / "shell"
+    if shell.exists():
+        if not args.force:
+            print(f"error: {shell} already exists (pass --force to replace)", file=sys.stderr)
+            return 1
+        shutil.rmtree(shell)
+
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, shell, symlinks=False, ignore=IGNORED)
+
+    shutil.copyfile(entry, shell / ENTRY_NAME)
+    shutil.copyfile(adapter, shell / MAIN_NAME)
+
+    (destination / "theme.env").write_text(
+        "\n".join([
+            "# Generated by qsgreet-theme-prepare. Sourced by the launcher.",
+            f"QSGREET_SURFACE={args.surface}",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+
+    state = destination / "state"
+    if state.exists():
+        shutil.rmtree(state)
+    if args.appearance:
+        print("exporting appearance:")
+        export_appearance(source, destination, args.appearance_config)
+
+    size_mb = sum(f.stat().st_size for f in shell.rglob("*") if f.is_file()) / (1024 * 1024)
+    print(f"prepared theme at {destination} ({size_mb:.0f} MiB)")
+    print(f"  shell root : {shell}")
+    print(f"  surface    : {args.surface} ({args.kind})")
+    print(f"  entry      : {shell / ENTRY_NAME}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

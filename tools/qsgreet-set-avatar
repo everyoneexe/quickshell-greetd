@@ -1,0 +1,74 @@
+#!/bin/bash
+# Put a user's avatar somewhere the greeter can actually read it.
+#
+# The greeter runs as `greeter`, so ~/.face and ~/.face.icon are invisible to
+# it - a home directory is normally mode 700. This copies the image into a
+# shared, world-readable store instead.
+#
+#   sudo qsgreet-set-avatar ~/Pictures/me.png
+#   sudo qsgreet-set-avatar /path/to/avatar.png someuser
+#
+# With no user argument the account that invoked sudo is used.
+
+set -euo pipefail
+
+STORE="${QSGREET_AVATAR_STORE:-/var/cache/quickshell-greetd/avatars}"
+
+die() {
+    printf 'qsgreet-set-avatar: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat >&2 <<EOF
+usage: qsgreet-set-avatar <image> [user]
+       qsgreet-set-avatar --remove [user]
+
+Avatars are stored in $STORE/<user>, readable by the greeter.
+EOF
+    exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+
+remove=0
+if [[ "$1" == "--remove" ]]; then
+    remove=1
+    shift
+    image=""
+else
+    image="${1:-}"
+    shift
+fi
+
+user="${1:-${SUDO_USER:-$(id -un)}}"
+
+id -u "$user" >/dev/null 2>&1 || die "no such user: $user"
+
+if [[ "$remove" == "1" ]]; then
+    rm -f -- "$STORE/$user"
+    echo "removed avatar for $user"
+    exit 0
+fi
+
+[[ -n "$image" ]] || usage
+[[ -r "$image" ]] || die "cannot read image: $image"
+
+# Reject anything that is not an image, so the greeter never tries to render
+# an arbitrary file a user pointed it at.
+if command -v file >/dev/null; then
+    mime=$(file --brief --mime-type -- "$image")
+    case "$mime" in
+        image/*) ;;
+        *) die "not an image ($mime): $image" ;;
+    esac
+fi
+
+if ! install -d -m 0755 "$STORE" 2>/dev/null; then
+    die "cannot create $STORE (run as root, or set QSGREET_AVATAR_STORE)"
+fi
+
+install -m 0644 -- "$image" "$STORE/$user" \
+    || die "cannot write $STORE/$user (run as root)"
+
+echo "avatar for $user installed to $STORE/$user"
