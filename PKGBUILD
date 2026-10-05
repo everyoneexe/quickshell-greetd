@@ -6,15 +6,21 @@ pkgdesc="Theme-agnostic greetd greeter built on Quickshell; runs an existing Qui
 arch=('any')
 url="https://github.com/everyoneexe/quickshell-greetd"
 license=('MIT')
-depends=('quickshell' 'greetd' 'cage' 'seatd' 'python')
+# cage is the default greeter compositor; python runs qsgreet-theme-prepare.
+# seatd is only needed without logind, which already provides seats on a
+# systemd system.
+depends=('quickshell' 'greetd' 'cage' 'python')
 optdepends=(
+    'seatd: seat management without logind'
     'niri: layer-shell greeter compositor with multi-output support'
     'sway: layer-shell greeter compositor with multi-output support'
+    'fprintd: fingerprint login, via pam_fprintd in /etc/pam.d/greetd'
+    'gnome-keyring: keyring unlock at login, via pam_gnome_keyring'
 )
 backup=('etc/quickshell-greetd/config.env')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('d4d5ac7e0282736df3b0395bca663b7b7a19e1b0a9516e4780402aa7454b3097')
 
 package() {
     cd "$pkgname-$pkgver"
@@ -36,8 +42,6 @@ package() {
     install -Dm755 launcher/quickshell-greetd-launcher "$pkgdir/usr/bin/quickshell-greetd-launcher"
     install -Dm755 tools/qsgreet-theme-prepare "$pkgdir/usr/bin/qsgreet-theme-prepare"
     install -Dm755 tools/qsgreet-set-avatar "$pkgdir/usr/bin/qsgreet-set-avatar"
-
-    install -dm755 "$share/themes"
 
     # Shared avatar store; see assets/tmpfiles.conf for why it is public.
     install -Dm644 assets/tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/$pkgname.conf"
