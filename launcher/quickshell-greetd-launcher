@@ -205,6 +205,34 @@ if [[ -r "$STATE_DIR/last-session" ]]; then
     export QSGREET_LAST_SESSION
 fi
 
+# --- session isolation ------------------------------------------------------
+# A greeter must not be able to see a logged-in user's session. If it can
+# reach their D-Bus, a lockscreen theme's media card happily shows what they
+# are playing - before anyone has authenticated. Measured: with the user's
+# bus reachable the card renders the current track; with it unreachable the
+# card disappears.
+#
+# Under greetd this cannot normally happen, because the greeter runs as its
+# own user with its own XDG_RUNTIME_DIR. These are belt and braces for the
+# cases that are not normal: a misconfigured greetd, or someone testing the
+# launcher from their own shell.
+unset DBUS_SESSION_BUS_ADDRESS
+unset SSH_AUTH_SOCK GNOME_KEYRING_CONTROL
+unset DISPLAY XAUTHORITY
+unset SWAYSOCK NIRI_SOCKET HYPRLAND_INSTANCE_SIGNATURE I3SOCK
+unset PULSE_SERVER PIPEWIRE_REMOTE
+
+# Unsetting the address is not enough on its own: libdbus falls back to
+# $XDG_RUNTIME_DIR/bus. Refuse a runtime directory that belongs to someone
+# else, since every session socket lives there.
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" ]]; then
+    runtime_owner=$(stat -c %u "$XDG_RUNTIME_DIR" 2>/dev/null || echo "")
+    if [[ -n "$runtime_owner" && "$runtime_owner" != "$EUID" ]]; then
+        die "XDG_RUNTIME_DIR ($XDG_RUNTIME_DIR) belongs to uid $runtime_owner, not $EUID;
+       refusing to start a greeter with access to another user's session"
+    fi
+fi
+
 # --- compositor -------------------------------------------------------------
 # cage has no wlr-layer-shell, so the core must use a plain toplevel there.
 # niri and sway do, which gives proper per-output surfaces.
