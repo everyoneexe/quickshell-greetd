@@ -20,7 +20,10 @@ optdepends=(
 backup=('etc/quickshell-greetd/config.env')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('d4d5ac7e0282736df3b0395bca663b7b7a19e1b0a9516e4780402aa7454b3097')
+# SKIP here on purpose: this file lives inside the tarball it would check,
+# so pinning a digest can never be self-consistent. The AUR copy carries the
+# real sha256, generated with `makepkg -g` after the release is tagged.
+sha256sums=('SKIP')
 
 package() {
     cd "$pkgname-$pkgver"
