@@ -77,9 +77,34 @@ The tool **copies** the tree - it refuses any destination inside the source,
 so your live shell config is never written to. The copy is necessary because
 the greeter runs as `greeter` and cannot read a mode-700 home directory.
 
-The lock surface is loaded verbatim. It receives a `GreeterLockContext`
-instead of the lockscreen's PAM-backed `LockContext`, which is why the
+The lock surface is loaded verbatim. Only one file in the tree is replaced:
+the shell's own `LockContext.qml`, swapped for a greetd-backed one of the
+same type name, with the original kept as `LockContext.qml.qsgreet-orig`.
+That file is the PAM boundary - the single place a lockscreen does something
+a greeter cannot. Everything that draws is untouched, which is why the
 rendering is identical rather than reimplemented.
+
+### Verified lockscreens
+
+Each of these renders and authenticates end to end, measured against a
+greetd server with real keystrokes under cage:
+
+| Surface | Lines | Prepare |
+|---|---|---|
+| `modules/iris/lock/IrisLockSurface.qml` | 426 | default |
+| `modules/lock/LockSurface.qml` (end-4 / illogical-impulse) | 1052 | default |
+| `modules/lock/LockSurface.qml` (inir) | 2105 | default |
+| `modules/waffle/lock/WaffleLockSurfaceSafe.qml` | 1575 | `--context modules/lock/LockContext.qml` |
+
+![end-4's lockscreen running as a greeter](docs/screenshot-end4.png)
+
+Pass `--context` when the shell keeps its context file somewhere other than
+next to the surface; prepare says so explicitly when it cannot find it.
+
+A foreign greeter that is not a lockscreen at all works too, with
+`--kind standalone` - [Airlock](https://github.com/AstraSuite/Airlock) is
+verified. SDDM themes are out of scope; see
+[docs/THEME_CONTRACT.md](docs/THEME_CONTRACT.md) for why.
 
 `--appearance` also exports the palette, wallpaper and shell config so the
 colours match. That directory is world-readable, so credential-shaped config

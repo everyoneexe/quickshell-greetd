@@ -233,6 +233,9 @@ qsgreet-theme-prepare /path/to/Airlock \
 ```
 
 It renders, with no warnings, once its own plugin is on `QML_IMPORT_PATH`.
+
+![Airlock hosted as a standalone theme](screenshot-airlock.png)
+
 What the experiment showed:
 
 - A surface with no required properties loads as-is under `--kind standalone`.
