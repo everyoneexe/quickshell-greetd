@@ -67,6 +67,36 @@ Picking the wrong one is not fatal but is visible: assigning `context` to a
 surface that has no such property logs
 `Cannot assign to non-existent property "context"`.
 
+### Typed contexts
+
+Most lock surfaces declare a *typed* property:
+
+```qml
+required property LockContext context      // ii, waffle
+required property var context              // iris
+```
+
+QML enforces the type, so a foreign object is refused outright:
+
+```
+Cannot assign QObject* to LockContext_QMLTYPE_434*
+```
+
+The only way to satisfy it is to be that type, and in QML the type is the
+file name. So `--kind lockscreen` replaces the shell's own context file with
+a greetd-backed one of the same name, keeping the original as
+`<name>.qml.qsgreet-orig`. Exactly one file changes, and it is the PAM
+boundary - the one place a lockscreen does something a greeter cannot.
+
+Pass `--context <path>` when the file is not next to the surface, as with
+`modules/waffle/lock/` whose context lives in `modules/lock/`.
+
+Type identity also depends on *how* the surface reaches the name, and
+getting it wrong fails the same way in the other direction. A file in the
+surface's own directory beats any module import, so the context is created
+by URL in that case and through its `qmldir` module otherwise. Both
+directions were measured.
+
 A `standalone` surface usually talks to `Quickshell.Services.Greetd`
 directly, which bypasses `QsGreet.Auth`. The window and the recovery path
 still belong to the core, but the "themes cannot drive authentication"
@@ -136,6 +166,15 @@ qsgreet-theme-prepare ~/.config/quickshell/inir \
     --surface modules/iris/lock/IrisLockSurface.qml \
     /usr/share/quickshell-greetd/themes/iris
 ```
+
+Surfaces verified to render and authenticate end to end:
+
+| Surface | Lines | Context | Note |
+|---|---|---|---|
+| `modules/iris/lock/IrisLockSurface.qml` | 426 | `var` | no substitution needed |
+| `modules/lock/LockSurface.qml` (end-4 / ii) | 1052 | typed, same dir | the file v1 of this project shipped and could not run |
+| `modules/lock/LockSurface.qml` (inir) | 2105 | typed, same dir | heaviest: UPower, Mpris, SystemTray, bar, weather |
+| `modules/waffle/lock/WaffleLockSurfaceSafe.qml` | 1575 | typed, other dir | needs `--context modules/lock/LockContext.qml` |
 
 Context members provided: `currentText`, `unlockInProgress`, `showFailure`,
 `fingerprintsConfigured`, `statusMessage`, `targetAction` + `ActionEnum`,
