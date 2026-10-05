@@ -1,6 +1,6 @@
 # Maintainer: everyoneexe <everyoneexe@users.noreply.github.com>
 pkgname=quickshell-greetd
-pkgver=2.0.0
+pkgver=2.1.0
 pkgrel=1
 pkgdesc="Theme-agnostic greetd greeter built on Quickshell; runs an existing Quickshell lockscreen as the login screen"
 arch=('any')
